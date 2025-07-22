@@ -1,17 +1,28 @@
 import random
 import time
 import requests
+import threading
+import os
+import logging
+
+# 로그 설정
+os.makedirs("log", exist_ok=True)
+logging.basicConfig(
+    filename="log/log.txt",
+    filemode="w",  # 실행 시마다 새로 작성
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
 
 BASE_URL = "https://algoduck.duckdns.org"
 SUBMIT_URL = f"{BASE_URL}/submissions/test"
 RESULT_URL_TEMPLATE = f"{BASE_URL}/submissions/test/{{submission_id}}"
-N = 1  # 총 제출 횟수
+N = 1000  # 제출 횟수
 
 PROBLEM_IDS = [1000, 1001, 1002, 1003]
-MEMBER_IDS = list(range(1, 101))  # 1 ~ 100
-
-# 코드 타입
-CODE_TYPES = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2,  3, 3, 3, 3, 4, 4, 4, 5, 5, 5]
+MEMBER_IDS = list(range(1, 101))
+CODE_TYPES = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 3, 3, 3, 3, 4, 4, 4, 5, 5, 5]
 
 # 결과를 유도하는 코드
 CODES = [
@@ -49,22 +60,18 @@ CODES = [
     ],
 ]
 
-LANGUAGE_ID = 1001  # 예시로 Java
-VERSION_ID = 1001  # 예시로 Java 8
+LANGUAGE_ID = 1001
+VERSION_ID = 1001
+
+submission_times = {}  # {submission_id: start_time}
+elapsed_times = []  # 각 제출의 소요 시간 기록
 
 
 def submit_one():
     member_id = random.choice(MEMBER_IDS)
     problem_id = random.choice(PROBLEM_IDS)
     code_type = random.choice(CODE_TYPES)
-    
-    print("member_id = ", member_id)
-    print("problem_id = ", problem_id)
-    print("code_type = ", code_type)
-    
     code = CODES[problem_id % 1000][code_type]
-    
-    # print("code = ", code)
 
     payload = {
         "memberId": member_id,
@@ -77,48 +84,64 @@ def submit_one():
         response = requests.post(SUBMIT_URL, json=payload)
         response.raise_for_status()
         submission_id = response.json()["data"]["submissionId"]
-        print(
-            f"Submitted (member: {member_id}, problem: {problem_id}, type: {code_type}) → id={submission_id}"
-        )
+        submission_times[submission_id] = time.time()
+        logging.info(f"[SUBMIT] ID={submission_id} by member {member_id}, problem {problem_id}, type {code_type}")
         return submission_id
     except Exception as e:
-        print(f"Submit failed: {e}")
+        logging.error(f"[ERROR] Submit failed: {e}")
         return None
 
 
-def wait_for_result(submission_id, max_retries=20, delay=0.5):
-    for _ in range(max_retries):
+def wait_for_result(submission_id):
+    try_count = 0
+    while try_count < 1000:
         try:
             res = requests.get(RESULT_URL_TEMPLATE.format(submission_id=submission_id))
             res.raise_for_status()
-            status = res.json()["data"]["status"]
-            if status not in ["JUDGING"]:
-                print(f"Result: id={submission_id}, status={status}")
-                return status
+            data = res.json()["data"]
+            status = data["status"]
+            if status != "JUDGING":
+                end_time = time.time()
+                duration = end_time - submission_times[submission_id]
+                elapsed_times.append(duration)
+                logging.info(f"[RESULT] ID={submission_id} → {status} ({duration:.2f} sec)")
+                return
         except Exception as e:
-            print(f"Error fetching result for {submission_id}: {e}")
-        time.sleep(delay)
-    print(f"Timeout: id={submission_id}")
-    return "TIMEOUT"
+            logging.error(f"[ERROR] Fetching result for {submission_id}: {e}")
+        try_count += 1
+        time.sleep(0.5)
+    logging.warning(f"[TIMEOUT] ID={submission_id}")
 
 
 def main():
-    submission_ids = []
     start = time.time()
+    submission_ids = []
 
-    # 1단계: 제출 N번
     for _ in range(N):
         sid = submit_one()
         if sid:
             submission_ids.append(sid)
-        time.sleep(0.1)  # 간단한 rate 제한
+        time.sleep(0.05)
 
-    # 2단계: 결과 조회
+    threads = []
     for sid in submission_ids:
-        wait_for_result(sid)
-        
+        t = threading.Thread(target=wait_for_result, args=(sid,))
+        t.start()
+        threads.append(t)
+
+    for t in threads:
+        t.join()
+
     end = time.time()
-    print(f"Total elapsed time: {end - start:.2f} seconds")
+    total_time = end - start
+
+    if elapsed_times:
+        avg = sum(elapsed_times) / len(elapsed_times)
+        logging.info(f"평균 채점 소요 시간: {avg:.2f}초 (총 {len(elapsed_times)}건)")
+    else:
+        logging.warning("유효한 채점 결과가 없습니다.")
+
+    logging.info(f"전체 테스트 소요 시간: {total_time:.2f}초")
 
 
 if __name__ == "__main__":
